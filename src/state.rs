@@ -291,7 +291,7 @@ impl<'a, S: Storage> Config<'a, S> {
     }
 }
 
-/// This struct refactors out the readonly methods that we need for `Config` and `ReadonlyConfig`
+/// This struct factors out the readonly methods that we need for `Config` and `ReadonlyConfig`
 /// in a way that is generic over their mutability.
 ///
 /// This was the only way to prevent code duplication of these methods because of the way
