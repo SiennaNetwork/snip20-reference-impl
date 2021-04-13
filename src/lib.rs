@@ -5,17 +5,19 @@ pub mod receiver; use crate::receiver::Snip20ReceiveMsg;
 pub mod state; use crate::state::{
     get_receiver_hash, get_transfers, read_allowance, read_viewing_key, set_receiver_hash,
     store_transfer, write_allowance, write_viewing_key, Balances, Config, Constants,
-    ReadonlyBalances, ReadonlyConfig,
+    ReadonlyBalances, ReadonlyConfig, Tx
 };
-pub mod msg; use crate::msg::{
-    InitConfig, InitialBalance, ResponseStatus, ContractStatusLevel,
-    QueryAnswer, HandleAnswer, space_pad
-};
+//pub mod msg; use crate::msg::{
+    //InitConfig, InitialBalance, ResponseStatus, ContractStatusLevel,
+    //QueryAnswer, HandleAnswer, space_pad
+//};
 mod rand; use crate::rand::sha_256;
 mod utils;
 mod viewing_key; use crate::viewing_key::{ViewingKey, VIEWING_KEY_SIZE};
 
-use cosmwasm_std::{log, Api, Extern, QueryResult, ReadonlyStorage, Storage};
+use cosmwasm_std::{log, ReadonlyStorage};
+use serde::{Deserialize, Serialize};
+use schemars::JsonSchema;
 
 contract!(
     [State] {}
@@ -37,18 +39,18 @@ contract!(
             decimals:               decimals,
             admin:                  admin.clone(),
             prng_seed:              sha_256(&prng_seed.0).to_vec(),
-            total_supply_is_public: msg.config().public_total_supply(),
+            total_supply_is_public: msg.config.unwrap().public_total_supply(), // FIXME
         })?;
         config.set_total_supply(initial_total_supply(&mut deps, initial_balances.unwrap_or_default())?);
         config.set_contract_status(ContractStatusLevel::NormalRun);
         config.set_minters(Vec::from([admin]))?;
-        Ok(InitResponse::default())
+        Ok(None)
     }
     [Query] (deps, state, msg) {
         TokenInfo () {
-            let config = ReadonlyConfig::from_storage(storage);
+            let config = ReadonlyConfig::from_storage(&deps.storage);
             let constants = config.constants()?;
-            to_binary(&QueryAnswer::TokenInfo {
+            Ok(QueryAnswer::TokenInfo {
                 name:     constants.name,
                 symbol:   constants.symbol,
                 decimals: constants.decimals,
@@ -61,40 +63,41 @@ contract!(
         }
         /// FIXME: Returns a constant 1:1 rate to uscrt, since that's the purpose of this
         ExchangeRate () {
-            to_binary(&QueryAnswer::ExchangeRate {
+            Ok(QueryAnswer::ExchangeRate {
                 rate: Uint128(1),
                 denom: "uscrt".to_string(),
             })
         }
         /// Initially, the admin is the only minter.
         Minters () {
-            to_binary(&QueryAnswer::Minters {
+            Ok(QueryAnswer::Minters {
                 minters: ReadonlyConfig::from_storage(&deps.storage).minters()
             })
         }
         /// Requires viewing key
         Balance (address: HumanAddr, key: String) {
-            let address = deps.api.canonical_address(address)?;
-            to_binary(&QueryAnswer::Balance {
+            let address = deps.api.canonical_address(&address)?;
+            Ok(QueryAnswer::Balance {
                 amount: Uint128(ReadonlyBalances::from_storage(&deps.storage).account_amount(&address))
             })
         }
         /// Requires viewing key
         TransferHistory (address: HumanAddr, key: String, page: u32, page_size: u32) {
-            let address = deps.api.canonical_address(address).unwrap();
-            to_binary(&QueryAnswer::TransferHistory {
+            let address = deps.api.canonical_address(&address)?;
+            Ok(QueryAnswer::TransferHistory {
                 txs: get_transfers(&deps.api, &deps.storage, &address, page, page_size)?
             })
         }
         /// Requires viewing key
         Allowance (owner: HumanAddr, spender: HumanAddr, key: String) {
-            try_check_allowance(deps, owner, spender);
             let owner_canon   = deps.api.canonical_address(&owner)?;
             let spender_canon = deps.api.canonical_address(&spender)?;
             let allowance  = read_allowance(&deps.storage, &owner_canon, &spender_canon)?;
-            let expiration = allowance.expiration;
-            let allowance  = Uint128(allowance.amount);
-            to_binary(&QueryAnswer::Allowance { owner, spender, allowance, expiration })
+            Ok(QueryAnswer::Allowance {
+                owner, spender,
+                allowance:  Uint128(allowance.amount),
+                expiration: allowance.expiration
+            })
         }
     }
     [Response] {}
@@ -221,7 +224,7 @@ contract!(
             is_not_stopped(&config);
 
             let burner = deps.api.canonical_address(&env.message.sender)?;
-            let owner = deps.api.canonical_address(owner)?;
+            let owner = deps.api.canonical_address(&owner)?;
             let amount = amount.u128();
             let mut allowance = read_allowance(&deps.storage, &owner, &burner)?;
             if allowance.expiration.map(|ex| ex < env.block.time) == Some(true) {
@@ -272,7 +275,7 @@ contract!(
             let mut config = Config::from_storage(&mut deps.storage);
             is_not_stopped(&config)?;
 
-            try_transfer_impl(deps, env, recipient, amount)?;
+            try_transfer_impl(deps, env, &recipient, amount)?;
             Ok((padded(HandleResponse {
                 messages: vec![],
                 log: vec![],
@@ -283,7 +286,7 @@ contract!(
             let mut config = Config::from_storage(&mut deps.storage);
             is_not_stopped(&config)?;
 
-            try_transfer_from_impl(deps, env, owner, recipient, amount)?;
+            try_transfer_from_impl(deps, env, &owner, &recipient, amount)?;
 
             let data = Some(to_binary(&HandleAnswer::TransferFrom { status: ResponseStatus::Success })?);
             Ok((padded(HandleResponse { messages: vec![], log: vec![], data }), None))
@@ -301,10 +304,12 @@ contract!(
             is_not_stopped(&config)?;
 
             let sender = env.message.sender.clone();
-            try_transfer_from_impl(deps, env, owner, recipient, amount)?;
+            try_transfer_from_impl(deps, env, &owner, &recipient, amount)?;
 
             let mut messages = vec![];
-            try_add_receiver_api_callback(&mut messages, &deps.storage, recipient, msg, sender, owner.clone(), amount)?;
+            try_add_receiver_api_callback(
+                &mut messages, &deps.storage, &recipient, msg, sender, owner.clone(), amount
+            )?;
 
             let data = Some(to_binary(&HandleAnswer::SendFrom { status: ResponseStatus::Success })?);
             Ok((padded(HandleResponse { messages, log: vec![], data }), None))
@@ -357,7 +362,7 @@ contract!(
             allowance.amount = allowance.amount.saturating_add(amount.u128());
             if expiration.is_some() { allowance.expiration = expiration; }
             let new_amount = allowance.amount;
-            write_allowance(&mut deps.storage, &owner, &spender, allowance)?;
+            write_allowance(&mut deps.storage, &owner, &spender_canon, allowance)?;
 
             let owner = env.message.sender;
             let allowance = Uint128(new_amount);
@@ -365,7 +370,7 @@ contract!(
             let data = Some(to_binary(&msg)?);
             Ok((padded(HandleResponse { messages: vec![], log: vec![], data }), None))
         }
-        DecreaseAllowance (spender: HumanAddr, amount: Uint128, expiration: Option<String>) {
+        DecreaseAllowance (spender: HumanAddr, amount: Uint128, expiration: Option<u64>) {
             let mut config = Config::from_storage(&mut deps.storage);
             is_not_stopped(&config);
 
@@ -375,7 +380,7 @@ contract!(
             allowance.amount = allowance.amount.saturating_sub(amount.u128());
             if expiration.is_some() { allowance.expiration = expiration; }
             let new_amount = allowance.amount;
-            write_allowance(&mut deps.storage, &owner, &spender, allowance)?;
+            write_allowance(&mut deps.storage, &owner, &spender_canon, allowance)?;
 
             let owner = env.message.sender;
             let allowance = Uint128(new_amount);
@@ -408,14 +413,6 @@ fn initial_total_supply <S:Storage,A:Api,Q:Querier> (
         }
     }
     Ok(total_supply)
-}
-
-fn padded (response: HandleResponse) -> HandleResponse {
-    response.data = response.data.map(|mut data| {
-        space_pad(RESPONSE_BLOCK_SIZE, &mut data.0);
-        data
-    });
-    response
 }
 
 fn is_not_stopped <'a,S:Storage> (config: &Config<'a,S>) -> StdResult<()> {
@@ -617,26 +614,191 @@ fn is_valid_symbol(symbol: &str) -> bool {
     len_is_valid && symbol.bytes().all(|byte| b'A' <= byte && byte <= b'Z')
 }
 
-// pub fn migrate<S: Storage, A: Api, Q: Querier>(
-//     _deps: &mut Extern<S, A, Q>,
-//     _env: Env,
-//     _msg: MigrateMsg,
-// ) -> StdResult<MigrateResponse> {
-//     Ok(MigrateResponse::default())
-// }
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, JsonSchema)]
+pub struct InitialBalance {
+    pub address: HumanAddr,
+    pub amount: Uint128,
+}
 
-pub fn try_check_allowance<S: Storage, A: Api, Q: Querier>(
-    deps: &Extern<S, A, Q>,
-    owner: HumanAddr,
-    spender: HumanAddr,
-) -> StdResult<Binary> {
-    let owner_canon = deps.api.canonical_address(&owner)?;
-    let spender_canon = deps.api.canonical_address(&spender)?;
-    let allowance = read_allowance(&deps.storage, &owner_canon, &spender_canon)?;
-    to_binary(&QueryAnswer::Allowance {
-        owner,
-        spender,
-        allowance: Uint128(allowance.amount),
-        expiration: allowance.expiration,
-    })
+#[derive(Serialize, Deserialize, Clone, PartialEq, JsonSchema, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseStatus {
+    Success,
+    Failure,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, JsonSchema, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum ContractStatusLevel {
+    NormalRun,
+    StopAllButRedeems,
+    StopAll,
+}
+
+pub fn status_level_to_u8(status_level: ContractStatusLevel) -> u8 {
+    match status_level {
+        ContractStatusLevel::NormalRun => 0,
+        ContractStatusLevel::StopAllButRedeems => 1,
+        ContractStatusLevel::StopAll => 2,
+    }
+}
+
+pub fn u8_to_status_level(status_level: u8) -> StdResult<ContractStatusLevel> {
+    match status_level {
+        0 => Ok(ContractStatusLevel::NormalRun),
+        1 => Ok(ContractStatusLevel::StopAllButRedeems),
+        2 => Ok(ContractStatusLevel::StopAll),
+        _ => Err(StdError::generic_err("Invalid state level")),
+    }
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum HandleAnswer {
+    // Native
+    Deposit {
+        status: ResponseStatus,
+    },
+    Redeem {
+        status: ResponseStatus,
+    },
+
+    // Base
+    Transfer {
+        status: ResponseStatus,
+    },
+    Send {
+        status: ResponseStatus,
+    },
+    Burn {
+        status: ResponseStatus,
+    },
+    RegisterReceive {
+        status: ResponseStatus,
+    },
+    CreateViewingKey {
+        key: ViewingKey,
+    },
+    SetViewingKey {
+        status: ResponseStatus,
+    },
+
+    // Allowance
+    IncreaseAllowance {
+        spender: HumanAddr,
+        owner: HumanAddr,
+        allowance: Uint128,
+    },
+    DecreaseAllowance {
+        spender: HumanAddr,
+        owner: HumanAddr,
+        allowance: Uint128,
+    },
+    TransferFrom {
+        status: ResponseStatus,
+    },
+    SendFrom {
+        status: ResponseStatus,
+    },
+    BurnFrom {
+        status: ResponseStatus,
+    },
+
+    // Mint
+    Mint {
+        status: ResponseStatus,
+    },
+    AddMinters {
+        status: ResponseStatus,
+    },
+    RemoveMinters {
+        status: ResponseStatus,
+    },
+    SetMinters {
+        status: ResponseStatus,
+    },
+
+    // Other
+    ChangeAdmin {
+        status: ResponseStatus,
+    },
+    SetContractStatus {
+        status: ResponseStatus,
+    },
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryAnswer {
+    TokenInfo {
+        name: String,
+        symbol: String,
+        decimals: u8,
+        total_supply: Option<Uint128>,
+    },
+    ExchangeRate {
+        rate: Uint128,
+        denom: String,
+    },
+    Allowance {
+        spender: HumanAddr,
+        owner: HumanAddr,
+        allowance: Uint128,
+        expiration: Option<u64>,
+    },
+    Balance {
+        amount: Uint128,
+    },
+    TransferHistory {
+        txs: Vec<Tx>,
+    },
+
+    ViewingKeyError {
+        msg: String,
+    },
+    Minters {
+        minters: Vec<HumanAddr>,
+    },
+}
+
+fn padded (response: HandleResponse) -> HandleResponse {
+    response.data = response.data.map(|mut data| {
+        space_pad(RESPONSE_BLOCK_SIZE, &mut data.0);
+        data
+    });
+    response
+}
+
+/// Take a Vec<u8> and pad it up to a multiple of `block_size`, using spaces at the end.
+pub fn space_pad(block_size: usize, message: &mut Vec<u8>) -> &mut Vec<u8> {
+    let len = message.len();
+    let surplus = len % block_size;
+    if surplus == 0 {
+        return message;
+    }
+
+    let missing = block_size - surplus;
+    message.reserve(missing);
+    message.extend(std::iter::repeat(b' ').take(missing));
+    message
+}
+
+/// This type represents optional configuration values which can be overridden.
+/// All values are optional and have defaults which are more private by default,
+/// but can be overridden if necessary
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Default, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct InitConfig {
+    /// Indicates whether the total supply is public or should be kept secret.
+    /// default: False
+    public_total_supply: Option<bool>,
+    enable_mint:         Option<bool>,
+    enable_burn:         Option<bool>,
+    enable_deposit:      Option<bool>,
+    enable_redeem:       Option<bool>
+}
+impl InitConfig {
+    pub fn public_total_supply(&self) -> bool {
+        self.public_total_supply.unwrap_or(false)
+    }
 }
