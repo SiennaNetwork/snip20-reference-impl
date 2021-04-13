@@ -8,18 +8,14 @@ pub mod state; use crate::state::{
     ReadonlyBalances, ReadonlyConfig,
 };
 pub mod msg; use crate::msg::{
-    InitialBalance, ResponseStatus, ContractStatusLevel,
+    InitConfig, InitialBalance, ResponseStatus, ContractStatusLevel,
     QueryAnswer, HandleAnswer, space_pad
 };
 mod rand; use crate::rand::sha_256;
 mod utils;
 mod viewing_key; use crate::viewing_key::{ViewingKey, VIEWING_KEY_SIZE};
 
-use cosmwasm_std::{
-    log, to_binary, Api, Binary, CanonicalAddr, CosmosMsg, Env, Extern,
-    HandleResponse, HumanAddr, InitResponse, Querier, QueryResult, ReadonlyStorage, StdError,
-    StdResult, Storage, Uint128,
-};
+use cosmwasm_std::{log, Api, Extern, QueryResult, ReadonlyStorage, Storage};
 
 contract!(
     [State] {}
@@ -33,17 +29,17 @@ contract!(
         config:           Option<InitConfig>
     }) {
         validate_basics(&name, &symbol, decimals)?;
-        let init_config  = msg.config();
         let mut config = Config::from_storage(&mut deps.storage);
+        let admin = admin.unwrap_or_else(|| env.message.sender);
         config.set_constants(&Constants {
             name:                   name,
             symbol:                 symbol,
             decimals:               decimals,
-            admin:                  admin.unwrap_or_else(|| env.message.sender).clone(),
+            admin:                  admin.clone(),
             prng_seed:              sha_256(&prng_seed.0).to_vec(),
-            total_supply_is_public: init_config.public_total_supply(),
+            total_supply_is_public: msg.config().public_total_supply(),
         })?;
-        config.set_total_supply(initial_total_supply(deps, &initial_balances.unwrap_or_default()));
+        config.set_total_supply(initial_total_supply(&mut deps, initial_balances.unwrap_or_default())?);
         config.set_contract_status(ContractStatusLevel::NormalRun);
         config.set_minters(Vec::from([admin]))?;
         Ok(InitResponse::default())
@@ -72,21 +68,23 @@ contract!(
         }
         /// Initially, the admin is the only minter.
         Minters () {
-            let minters  = ReadonlyConfig::from_storage(&deps.storage).minters();
-            let response = QueryAnswer::Minters { minters };
-            to_binary(&response)
+            to_binary(&QueryAnswer::Minters {
+                minters: ReadonlyConfig::from_storage(&deps.storage).minters()
+            })
         }
         /// Requires viewing key
         Balance (address: HumanAddr, key: String) {
-            let address  = deps.api.canonical_address(account)?;
-            let amount   = Uint128(ReadonlyBalances::from_storage(&deps.storage).account_amount(&address));
-            to_binary(&QueryAnswer::Balance { amount })
+            let address = deps.api.canonical_address(address)?;
+            to_binary(&QueryAnswer::Balance {
+                amount: Uint128(ReadonlyBalances::from_storage(&deps.storage).account_amount(&address))
+            })
         }
         /// Requires viewing key
         TransferHistory (address: HumanAddr, key: String, page: u32, page_size: u32) {
-            let address = deps.api.canonical_address(account).unwrap();
-            let txs    = get_transfers(&deps.api, &deps.storage, &address, page, page_size)?;
-            to_binary(&QueryAnswer::TransferHistory { txs })
+            let address = deps.api.canonical_address(address).unwrap();
+            to_binary(&QueryAnswer::TransferHistory {
+                txs: get_transfers(&deps.api, &deps.storage, &address, page, page_size)?
+            })
         }
         /// Requires viewing key
         Allowance (owner: HumanAddr, spender: HumanAddr, key: String) {
@@ -143,16 +141,16 @@ contract!(
             Ok((padded(HandleResponse { messages: vec![], log: vec![], data }), None))
         }
         /// Remove minters
-        RemoveMinters (minters: Vec<HumanAddr>) {
+        RemoveMinters (minters_to_remove: Vec<HumanAddr>) {
             let mut config = Config::from_storage(&mut deps.storage);
             is_not_stopped(&config)?;
             is_admin(&config, &env.message.sender)?;
 
             config.remove_minters(minters_to_remove)?;
-            let data = Some(to_binary(&HandleAnswer::RemoveMinters { status: Success })?)
-            padded(Ok(HandleResponse { messages: vec![], log: vec![], data }))
+            let data = Some(to_binary(&HandleAnswer::RemoveMinters { status: ResponseStatus::Success })?);
+            Ok((padded(HandleResponse { messages: vec![], log: vec![], data }), None))
         }
-        Mint (recipient: HumanAddr, amount: Uin128) {
+        Mint (recipient: HumanAddr, amount: Uint128) {
             let mut config = Config::from_storage(&mut deps.storage);
             is_not_stopped(&config)?;
             is_minter(&config, &env.message.sender);
@@ -162,14 +160,14 @@ contract!(
             if let Some(new_total_supply) = total_supply.checked_add(amount) {
                 total_supply = new_total_supply;
             } else {
-                return Err(StdError::generic_err(
+                return Err(StatefulError((StdError::generic_err(
                     "This mint attempt would increase the total supply above the supported maximum",
-                ));
+                ), None)));
             }
             config.set_total_supply(total_supply);
-            let receipient_account = &deps.api.canonical_address(&address)?;
+            let recipient_canon = &deps.api.canonical_address(&recipient)?;
             let mut balances = Balances::from_storage(&mut deps.storage);
-            let mut account_balance = balances.balance(receipient_account);
+            let mut account_balance = balances.balance(recipient_canon);
             if let Some(new_balance) = account_balance.checked_add(amount) {
                 account_balance = new_balance;
             } else {
@@ -177,13 +175,13 @@ contract!(
                 // of the total supply, both are stored as u128, and we check for overflow of
                 // the total supply just a couple lines before.
                 // Still, writing this to cover all overflows.
-                return Err(StdError::generic_err(
+                return Err(StatefulError((StdError::generic_err(
                     "This mint attempt would increase the account's balance above the supported maximum",
-                ));
+                ), None)));
             }
-            balances.set_account_balance(receipient_account, account_balance);
-            let data = Some(to_binary(&HandleAnswer::Mint { status: Success })?);
-            padded(Ok(HandleResponse { messages: vec![], log: vec![], data }))
+            balances.set_account_balance(recipient_canon, account_balance);
+            let data = Some(to_binary(&HandleAnswer::Mint { status: ResponseStatus::Success })?);
+            Ok((padded(HandleResponse { messages: vec![], log: vec![], data }), None))
         }
         /// Remove `amount` tokens from the system irreversibly, from signer account
         /// @param amount the amount of money to burn
@@ -198,10 +196,10 @@ contract!(
             if let Some(new_account_balance) = account_balance.checked_sub(amount) {
                 account_balance = new_account_balance;
             } else {
-                return Err(StdError::generic_err(format!(
+                return Err(StatefulError((StdError::generic_err(format!(
                     "insufficient funds to burn: balance={}, required={}",
                     account_balance, amount
-                )));
+                )), None)));
             }
             balances.set_account_balance(&sender, account_balance);
             let mut config = Config::from_storage(&mut deps.storage);
@@ -209,73 +207,77 @@ contract!(
             if let Some(new_total_supply) = total_supply.checked_sub(amount) {
                 total_supply = new_total_supply;
             } else {
-                return Err(StdError::generic_err(
+                return Err(StatefulError((StdError::generic_err(
                     "You're trying to burn more than is available in the total supply",
-                ));
+                ), None)));
             }
             config.set_total_supply(total_supply);
 
-            let data = Some(to_binary(&HandleAnswer::Burn { status: Success })?);
-            padded(Ok(HandleResponse { messages: vec![], log: vec![], data }))
+            let data = Some(to_binary(&HandleAnswer::Burn { status: ResponseStatus::Success })?);
+            Ok((padded(HandleResponse { messages: vec![], log: vec![], data }), None))
         }
         BurnFrom (owner: HumanAddr, amount: Uint128) {
             let mut config = Config::from_storage(&mut deps.storage);
             is_not_stopped(&config);
 
-            let spender = deps.api.canonical_address(&env.message.sender)?;
+            let burner = deps.api.canonical_address(&env.message.sender)?;
             let owner = deps.api.canonical_address(owner)?;
             let amount = amount.u128();
-            let mut allowance = read_allowance(&deps.storage, &owner, &spender)?;
+            let mut allowance = read_allowance(&deps.storage, &owner, &burner)?;
             if allowance.expiration.map(|ex| ex < env.block.time) == Some(true) {
                 allowance.amount = 0;
-                write_allowance(&mut deps.storage, &owner, &spender, allowance)?;
-                return Err(insufficient_allowance(0, amount));
+                write_allowance(&mut deps.storage, &owner, &burner, allowance)?;
+                return Err(StatefulError((insufficient_allowance(0, amount), None)));
             }
             if let Some(new_allowance) = allowance.amount.checked_sub(amount) {
                 allowance.amount = new_allowance;
             } else {
-                return Err(insufficient_allowance(allowance.amount, amount));
+                return Err(StatefulError((insufficient_allowance(allowance.amount, amount), None)));
             }
-            write_allowance(&mut deps.storage, &owner, &spender, allowance)?;
+            write_allowance(&mut deps.storage, &owner, &burner, allowance)?;
             // subtract from owner account
             let mut balances = Balances::from_storage(&mut deps.storage);
             let mut account_balance = balances.balance(&owner);
             if let Some(new_balance) = account_balance.checked_sub(amount) {
                 account_balance = new_balance;
             } else {
-                return Err(StdError::generic_err(format!(
+                return Err(StatefulError((StdError::generic_err(format!(
                     "insufficient funds to burn: balance={}, required={}",
                     account_balance, amount
-                )));
+                )), None)));
             }
             balances.set_account_balance(&owner, account_balance);
             // remove from supply
             let mut config = Config::from_storage(&mut deps.storage);
+            let total_supply = config.total_supply();
             if let Some(new_total_supply) = total_supply.checked_sub(amount) {
                 config.set_total_supply(new_total_supply);
+                let data = Some(to_binary(&HandleAnswer::BurnFrom { status: ResponseStatus::Success })?);
+                Ok((padded(HandleResponse { messages: vec![], log: vec![], data }), None))
             } else {
-                return Err(StdError::generic_err(
+                return Err(StatefulError((StdError::generic_err(
                     "You're trying to burn more than is available in the total supply",
-                ));
+                ), None)));
             }
-            let data = Some(to_binary(&HandleAnswer::BurnFrom { status: Success })?);
-            padded(Ok(HandleResponse { messages: vec![], log: vec![], data }))
         }
 
         Deposit () {
-            Err((StdError::generic_err("not allowed."), None))
+            Err(StatefulError((StdError::generic_err("not allowed."), None)))
         }
         Redeem () {
-            Err((StdError::generic_err("not allowed."), None))
+            Err(StatefulError((StdError::generic_err("not allowed."), None)))
         }
 
         Transfer (recipient: HumanAddr, amount: Uint128) {
             let mut config = Config::from_storage(&mut deps.storage);
             is_not_stopped(&config)?;
 
-            let response = try_transfer(deps, env, &recipient, amount)?;
-
-            Ok((padded(response), None)
+            try_transfer_impl(deps, env, recipient, amount)?;
+            Ok((padded(HandleResponse {
+                messages: vec![],
+                log: vec![],
+                data: Some(to_binary(&HandleAnswer::Transfer { status: ResponseStatus::Success })?),
+            }), None))
         }
         TransferFrom (owner: HumanAddr, recipient: HumanAddr, amount: Uint128) {
             let mut config = Config::from_storage(&mut deps.storage);
@@ -283,7 +285,7 @@ contract!(
 
             try_transfer_from_impl(deps, env, owner, recipient, amount)?;
 
-            let data = Some(to_binary(&HandleAnswer::TransferFrom { status: ResponseStatus::Success })?)
+            let data = Some(to_binary(&HandleAnswer::TransferFrom { status: ResponseStatus::Success })?);
             Ok((padded(HandleResponse { messages: vec![], log: vec![], data }), None))
         }
         Send (recipient: HumanAddr, amount: Uint128, msg: Option<Binary>) {
@@ -292,7 +294,7 @@ contract!(
 
             let response = try_send(deps, env, &recipient, amount, msg)?;
 
-            Ok((padded(response), None)
+            Ok((padded(response), None))
         }
         SendFrom (owner: HumanAddr, recipient: HumanAddr, amount: Uint128, msg: Option<Binary>) {
             let mut config = Config::from_storage(&mut deps.storage);
@@ -349,9 +351,9 @@ contract!(
             let mut config = Config::from_storage(&mut deps.storage);
             is_not_stopped(&config);
 
-            let owner_canon = deps.api.canonical_address(&env.message.sender)?;
+            let owner = deps.api.canonical_address(&env.message.sender)?;
             let spender_canon = deps.api.canonical_address(&spender)?;
-            let mut allowance = read_allowance(&deps.storage, &owner_canon, &spender_canon)?;
+            let mut allowance = read_allowance(&deps.storage, &owner, &spender_canon)?;
             allowance.amount = allowance.amount.saturating_add(amount.u128());
             if expiration.is_some() { allowance.expiration = expiration; }
             let new_amount = allowance.amount;
@@ -367,9 +369,9 @@ contract!(
             let mut config = Config::from_storage(&mut deps.storage);
             is_not_stopped(&config);
 
-            let owner_canon = deps.api.canonical_address(&env.message.sender)?;
+            let owner = deps.api.canonical_address(&env.message.sender)?;
             let spender_canon = deps.api.canonical_address(&spender)?;
-            let mut allowance = read_allowance(&deps.storage, &owner_canon, &spender_canon)?;
+            let mut allowance = read_allowance(&deps.storage, &owner, &spender_canon)?;
             allowance.amount = allowance.amount.saturating_sub(amount.u128());
             if expiration.is_some() { allowance.expiration = expiration; }
             let new_amount = allowance.amount;
@@ -437,18 +439,10 @@ fn try_transfer_impl<S: Storage, A: Api, Q: Querier>(
     recipient: &HumanAddr,
     amount: Uint128,
 ) -> StdResult<()> {
-    let sender = deps.api.canonical_address(&env.message.sender)?;
+    let sender    = deps.api.canonical_address(&env.message.sender)?;
     let recipient = deps.api.canonical_address(recipient)?;
-
-    perform_transfer(
-        &mut deps.storage,
-        &sender,
-        &recipient,
-        amount.u128(),
-    )?;
-
+    perform_transfer(&mut deps.storage, &sender, &recipient, amount.u128(),)?;
     let symbol = Config::from_storage(&mut deps.storage).constants()?.symbol;
-
     store_transfer(
         &mut deps.storage,
         &sender,

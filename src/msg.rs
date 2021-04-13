@@ -6,7 +6,7 @@ use cosmwasm_std::{Binary, HumanAddr, StdError, StdResult, Uint128};
 use crate::state::Tx;
 use crate::viewing_key::ViewingKey;
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, JsonSchema)]
 pub struct InitialBalance {
     pub address: HumanAddr,
     pub amount: Uint128,
