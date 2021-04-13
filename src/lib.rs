@@ -7,10 +7,6 @@ pub mod state; use crate::state::{
     store_transfer, write_allowance, write_viewing_key, Balances, Config, Constants,
     ReadonlyBalances, ReadonlyConfig, Tx
 };
-//pub mod msg; use crate::msg::{
-    //InitConfig, InitialBalance, ResponseStatus, ContractStatusLevel,
-    //QueryAnswer, HandleAnswer, space_pad
-//};
 mod rand; use crate::rand::sha_256;
 mod utils;
 mod viewing_key; use crate::viewing_key::{ViewingKey, VIEWING_KEY_SIZE};
@@ -20,7 +16,9 @@ use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
 
 contract!(
+
     [State] {}
+
     [Init] (deps, env, msg: {
         name:             String,
         admin:            Option<HumanAddr>,
@@ -46,6 +44,7 @@ contract!(
         config.set_minters(Vec::from([admin]))?;
         Ok(None)
     }
+
     [Query] (deps, state, msg) {
         TokenInfo () {
             let config = ReadonlyConfig::from_storage(&deps.storage);
@@ -100,7 +99,9 @@ contract!(
             })
         }
     }
+
     [Response] {}
+
     [Handle] (deps, env, state, msg) {
         /// Allows transactions to be stopped 
         SetContractStatus (level: ContractStatusLevel) {
@@ -389,6 +390,7 @@ contract!(
             Ok((padded(HandleResponse { messages: vec![], log: vec![], data }), None))
         }
     }
+
 );
 
 /// We make sure that responses from `handle` are padded to a multiple of this size.
