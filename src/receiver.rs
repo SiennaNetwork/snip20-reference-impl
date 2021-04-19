@@ -2,8 +2,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use cosmwasm_std::{to_binary, Binary, CosmosMsg, HumanAddr, StdResult, Uint128, WasmMsg};
-use secret_toolkit::utils::space_pad;
 
+use crate::utils::space_pad;
 use crate::contract::RESPONSE_BLOCK_SIZE;
 
 /// Snip20ReceiveMsg should be de/serialized under `Receive()` variant in a HandleMsg

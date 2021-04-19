@@ -5,9 +5,6 @@ use cosmwasm_std::{
     HandleResponse, HumanAddr, InitResponse, Querier, QueryResult, ReadonlyStorage, StdError,
     StdResult, Storage, Uint128, WasmMsg
 };
-use cosmwasm_utils::crypto::sha_256;
-use cosmwasm_utils::viewing_key::{ViewingKey, VIEWING_KEY_SIZE};
-use secret_toolkit::utils::pad_handle_result;
 
 use snip20::data::ContractStatusLevel;
 use snip20::handle::{HandleMsg, HandleAnswer, ResponseStatus::Success};
@@ -20,6 +17,9 @@ use crate::state::{
     store_transfer, write_allowance, write_viewing_key, Balances, Config, Constants,
     ReadonlyBalances, ReadonlyConfig,
 };
+use crate::utils::pad_response;
+use crate::rand::sha_256;
+use crate::viewing_key::{ViewingKey, VIEWING_KEY_SIZE};
 
 /// We make sure that responses from `handle` are padded to a multiple of this size.
 pub const RESPONSE_BLOCK_SIZE: usize = 256;
@@ -131,7 +131,7 @@ pub fn handle<S: Storage, A: Api, Q: Querier>(
                     "This contract is stopped and this action is not allowed",
                 )),
             };
-            return pad_handle_result(response, RESPONSE_BLOCK_SIZE);
+            return pad_response(response, RESPONSE_BLOCK_SIZE);
         }
         ContractStatusLevel::NormalRun => {} // If it's a normal run just continue
     }
@@ -197,7 +197,7 @@ pub fn handle<S: Storage, A: Api, Q: Querier>(
         HandleMsg::SetMinters { minters, .. } => set_minters(deps, env, minters),
     };
 
-    pad_handle_result(response, RESPONSE_BLOCK_SIZE)
+    pad_response(response, RESPONSE_BLOCK_SIZE)
 }
 
 pub fn query<S: Storage, A: Api, Q: Querier>(deps: &Extern<S, A, Q>, msg: QueryMsg) -> QueryResult {
@@ -414,7 +414,7 @@ pub fn try_create_key<S: Storage, A: Api, Q: Querier>(
     Ok(HandleResponse {
         messages: vec![],
         log: vec![],
-        data: Some(to_binary(&HandleAnswer::CreateViewingKey { key })?),
+        data: Some(to_binary(&HandleAnswer::CreateViewingKey { key: key.0 })?),
     })
 }
 

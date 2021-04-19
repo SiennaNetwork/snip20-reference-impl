@@ -10,12 +10,12 @@ use secret_toolkit::storage::{AppendStore, AppendStoreMut, TypedStore, TypedStor
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-
-use cosmwasm_utils::viewing_key::ViewingKey;
 use serde::de::DeserializeOwned;
 
 use snip20::data::{status_level_to_u8, u8_to_status_level, ContractStatusLevel, Tx, StoredTx};
 use snip20::handle::DisabledMsg;
+
+use crate::viewing_key::ViewingKey;
 
 pub static CONFIG_KEY: &[u8] = b"config";
 pub const PREFIX_TXS: &[u8] = b"transfers";

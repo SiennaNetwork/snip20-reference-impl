@@ -3,7 +3,6 @@ use std::fmt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use cosmwasm_std::{Uint128, HumanAddr, Binary};
-use cosmwasm_utils::viewing_key::ViewingKey;
 
 use crate::data::ContractStatusLevel;
 
@@ -189,7 +188,7 @@ pub enum HandleAnswer {
         status: ResponseStatus,
     },
     CreateViewingKey {
-        key: ViewingKey,
+        key: String,
     },
     SetViewingKey {
         status: ResponseStatus,
