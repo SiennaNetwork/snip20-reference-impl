@@ -109,6 +109,7 @@ pub fn handle<S: Storage, A: Api, Q: Querier>(
             return pad_response(response);
         }
         ContractStatusLevel::NormalRun => {} // If it's a normal run just continue
+        ContractStatusLevel::Migrate => { unimplemented!() }
     }
 
     let response = match msg {

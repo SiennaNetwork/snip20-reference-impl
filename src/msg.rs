@@ -315,20 +315,23 @@ pub enum ResponseStatus {
 pub enum ContractStatusLevel {
     NormalRun,
     StopAll,
+    Migrate
 }
 
 pub fn status_level_to_u8(status_level: ContractStatusLevel) -> u8 {
     match status_level {
         ContractStatusLevel::NormalRun => 0,
-        ContractStatusLevel::StopAll => 2,
+        ContractStatusLevel::StopAll   => 2,
+        ContractStatusLevel::Migrate   => 100,
     }
 }
 
 pub fn u8_to_status_level(status_level: u8) -> StdResult<ContractStatusLevel> {
     match status_level {
-        0 => Ok(ContractStatusLevel::NormalRun),
-        2 => Ok(ContractStatusLevel::StopAll),
-        _ => Err(StdError::generic_err("Invalid state level")),
+        0   => Ok(ContractStatusLevel::NormalRun),
+        2   => Ok(ContractStatusLevel::StopAll),
+        100 => Ok(ContractStatusLevel::Migrate),
+        _   => Err(StdError::generic_err("Invalid state level")),
     }
 }
 
